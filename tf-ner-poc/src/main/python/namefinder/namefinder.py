@@ -32,6 +32,14 @@ class NameSample:
     def __init__(self, line):
         self.tokens = []
         self.names = []
+
+        #line = line.lower()
+        line = re.sub('\d', '0', line)
+        line = re.sub('-', ' - ', line)
+        line = re.sub('/', ' / ', line)
+        line = re.sub('"', ' ', line)
+        line = re.sub('`', ' ', line)
+        line = re.sub('\'', ' ', line)
         start_regex = re.compile("<START(:([^:>\\s]*))?>")
         parts = line.split()
         start_index = -1
@@ -70,13 +78,26 @@ class NameFinder:
 
             for line in f:
                 parts = line.strip().split(" ")
-                if len(parts) != self.__vector_size + 1:
-                    #print("Bad Vector: ",len(line),len(parts), line)
-                    raise VectorException("Bad Vector in line: {}, size: {} vector: {}".format(len(line),len(parts), line))
-                    continue
-                word_dict[parts[0]] = len(word_dict)
-                embeddings.append(np.array(parts[1:], dtype=np.float32))
+                if len(parts) == 2:
+                    # skip header
+                    print ("Header: " + line)
+                elif len(parts) != self.__vector_size + 1:
+                    print("Warning - bad Vector: ",len(line),len(parts), line)
+                    #raise VectorException("Bad Vector in line: {}, size: {} vector: {}".format(len(line),len(parts), line))
+                    #continue
+                else:
+                    word_dict[parts[0]] = len(word_dict)
+                    embeddings.append(np.array(parts[1:], dtype=np.float32))
 
+            if word_dict.get("__UNK__") is None:
+                word_dict["__UNK__"] = len(word_dict)
+                embeddings.append(np.array(np.random.uniform(low=-1, high=1, size=self.__vector_size), dtype=np.float32))
+
+            # print(word_dict["amar"])
+            # print(embeddings[word_dict["amar"]])
+            #
+            # print(word_dict["__UNK__"])
+            # print(embeddings[word_dict["__UNK__"]])
         # Create a reverse word dict
         rev_word_dict = {}
         for word, id in word_dict.items():
@@ -101,9 +122,11 @@ class NameFinder:
 
             for token in name_sample.tokens:
                 vector = 0
-                if word_dict.get(token) is not None:
-                    vector = word_dict[token]
+                lower = token.lower().strip()
+                if word_dict.get(lower) is not None:
+                    vector = word_dict[lower]
                 else:
+                    print("unk " + lower)
                     vector = word_dict['__UNK__']
 
                 sentence.append(vector)
@@ -123,6 +146,7 @@ class NameFinder:
                 if not label_string in self.label_dict:
                     self.label_dict[label_string] = len(self.label_dict)
 
+        chars_set.add('�')
         return sentences, labels, chars_set
 
     def encode_labels(self, labels):
@@ -169,7 +193,11 @@ class NameFinder:
 
                 word_chars = []
                 for c in rev_word_dict[word]:
-                    word_chars.append(char_dict[c]) # TODO: This fails if c is not present
+                    if c not in char_dict:
+                        #print("****** Missing " + c)
+                        word_chars.append(char_dict['�'])
+                    else:
+                        word_chars.append(char_dict[c]) # TODO: This fails if c is not present
 
                 sentence_word_length.append(len(word_chars))
                 word_chars = word_chars + [0] * max(max_word_length - len(word_chars), 0)
@@ -184,7 +212,7 @@ class NameFinder:
         return sb, cb, wlb, lb, seq_length
 
 
-    def create_graph(self, nchars, embedding_dict): # probably not necessary to pass in the embedding_dict, can be passed to init directly
+    def create_graph(self, ntags,   nchars, embedding_dict): # probably not necessary to pass in the embedding_dict, can be passed to init directly
 
         dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prop")
 
@@ -261,7 +289,7 @@ class NameFinder:
 
             labels = tf.placeholder(tf.int32, shape=[None, None], name="labels")
 
-        ntags = 7; # TODO: Compute this and not hard code
+        #ntags = #2*4+1; # TODO: Compute this and not hard code
 
         W = tf.get_variable("W", shape=[2*hidden_size, ntags], dtype=tf.float32)
         b = tf.get_variable("b", shape=[ntags], dtype=tf.float32, initializer=tf.zeros_initializer())
@@ -269,6 +297,15 @@ class NameFinder:
         context_rep_flat = tf.reshape(context_rep, [-1, 2*hidden_size])
         pred = tf.matmul(context_rep_flat, W) + b
         self.logits = tf.reshape(pred, [-1, ntime_steps, ntags], name="logits")
+
+        print("********************")
+        print("******************** self.logits")
+        print(self.logits)
+        print("******************** labels")
+        print(labels)
+        print("******************** sequence_lengths")
+        print(sequence_lengths)
+        print("********************")
 
         log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(
             self.logits, labels, sequence_lengths)
@@ -350,7 +387,7 @@ def main():
         print("Usage namefinder.py embedding_file train_file dev_file test_file")
         return
 
-    name_finder = NameFinder(100)
+    name_finder = NameFinder(300)
 
     word_dict, rev_word_dict, embeddings = name_finder.load_glove(sys.argv[1])
     sentences, labels, char_set = name_finder.load_data(word_dict, sys.argv[2])
@@ -358,8 +395,10 @@ def main():
 
     char_dict = {k: v for v, k in enumerate(char_set | char_set_dev)}
 
+    ntags = len(name_finder.label_dict)
+
     embedding_ph, token_ids_ph, char_ids_ph, word_lengths_ph, sequence_lengths_ph, labels_ph, dropout_keep_prob, train_op \
-        = name_finder.create_graph(len(char_set | char_set_dev), embeddings)
+        = name_finder.create_graph(ntags, len(char_set | char_set_dev), embeddings)
 
     write_mapping(word_dict, 'word_dict.txt')
     write_mapping(name_finder.label_dict, "label_dict.txt")
@@ -372,6 +411,8 @@ def main():
     no_improvement = 0
     with sess.as_default():
         init = tf.global_variables_initializer()
+        print("EMBEDDINGS")
+        print(embeddings)
         sess.run(init, feed_dict={embedding_ph: embeddings})
 
         batch_size = 20
